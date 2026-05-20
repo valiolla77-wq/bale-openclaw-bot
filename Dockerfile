@@ -4,8 +4,8 @@ FROM python:3.10-slim
 # Install system dependencies including Node.js and networking tools
 RUN apt-get update && apt-get install -y curl netcat-openbsd gnupg && curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*
 
-# Install OpenClaw globally
-RUN npm install -g openclaw
+# Install OpenClaw in a specific, known directory
+RUN npm install -g openclaw --prefix /app/bin
 
 # Set working directory
 WORKDIR /app

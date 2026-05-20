@@ -5,9 +5,19 @@ touch /app/openclaw.log
 
 echo "--- Step 1: Running OpenClaw Gateway ---"
 
-# Use npx to run openclaw. npx is the most reliable way to run globally installed npm packages
-# in Docker environments as it handles PATH resolution automatically.
-npx openclaw gateway --port 18789 >> /app/openclaw.log 2>&1 &
+# Use the explicit path defined in Dockerfile
+OPENCLAW_BIN="/app/bin/bin/openclaw"
+
+if [ -f "$OPENCLAW_BIN" ]; then
+    echo "Found OpenClaw at $OPENCLAW_BIN. Starting..."
+    $OPENCLAW_BIN gateway --port 18789 >> /app/openclaw.log 2>&1 &
+else
+    echo "Error: OpenClaw binary not found at $OPENCLAW_BIN."
+    # Debug: list files in the prefix directory
+    echo "Listing /app/bin content:"
+    ls -R /app/bin
+    exit 1
+fi
 
 echo "--- Step 2: Checking health of port 18789 ---"
 MAX_RETRIES=30
