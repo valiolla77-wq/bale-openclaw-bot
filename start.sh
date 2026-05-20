@@ -4,11 +4,24 @@
 touch /app/openclaw.log
 
 echo "--- Step 1: Running OpenClaw Gateway ---"
-# Run the command using its name instead of an absolute path to avoid "No such file" errors
-openclaw gateway --port 18789 >> /app/openclaw.log 2>&1 &
+
+# Detect OpenClaw path or use command name
+OPENCLAW_PATH=$(which openclaw)
+if [ -z "$OPENCLAW_PATH" ]; then
+    if [ -f "/usr/local/bin/openclaw" ]; then
+        OPENCLAW_PATH="/usr/local/bin/openclaw"
+    elif [ -f "/usr/bin/openclaw" ]; then
+        OPENCLAW_PATH="/usr/bin/openclaw"
+    else
+        echo "Error: openclaw command not found in common paths."
+        exit 1
+    fi
+fi
+
+echo "Using OpenClaw from: $OPENCLAW_PATH"
+$OPENCLAW_PATH gateway --port 18789 >> /app/openclaw.log 2>&1 &
 
 echo "--- Step 2: Checking health of port 18789 ---"
-# Smart wait loop to ensure port is open
 MAX_RETRIES=30
 COUNT=0
 
@@ -26,5 +39,4 @@ done
 echo "OpenClaw is ready."
 
 echo "--- Step 3: Running Python Bot ---"
-# Run final process in foreground to keep container alive
 exec python3 /app/bot.py
