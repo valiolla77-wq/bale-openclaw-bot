@@ -4,8 +4,8 @@
 touch /app/openclaw.log
 
 echo "--- Step 1: Running OpenClaw Gateway ---"
-# Run the exact command in the background and redirect logs
-/usr/local/bin/openclaw gateway --port 18789 >> /app/openclaw.log 2>&1 &
+# Run the command using its name instead of an absolute path to avoid "No such file" errors
+openclaw gateway --port 18789 >> /app/openclaw.log 2>&1 &
 
 echo "--- Step 2: Checking health of port 18789 ---"
 # Smart wait loop to ensure port is open
