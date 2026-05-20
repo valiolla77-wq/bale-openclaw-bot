@@ -5,21 +5,9 @@ touch /app/openclaw.log
 
 echo "--- Step 1: Running OpenClaw Gateway ---"
 
-# Detect OpenClaw path or use command name
-OPENCLAW_PATH=$(which openclaw)
-if [ -z "$OPENCLAW_PATH" ]; then
-    if [ -f "/usr/local/bin/openclaw" ]; then
-        OPENCLAW_PATH="/usr/local/bin/openclaw"
-    elif [ -f "/usr/bin/openclaw" ]; then
-        OPENCLAW_PATH="/usr/bin/openclaw"
-    else
-        echo "Error: openclaw command not found in common paths."
-        exit 1
-    fi
-fi
-
-echo "Using OpenClaw from: $OPENCLAW_PATH"
-$OPENCLAW_PATH gateway --port 18789 >> /app/openclaw.log 2>&1 &
+# Use npx to run openclaw. npx is the most reliable way to run globally installed npm packages
+# in Docker environments as it handles PATH resolution automatically.
+npx openclaw gateway --port 18789 >> /app/openclaw.log 2>&1 &
 
 echo "--- Step 2: Checking health of port 18789 ---"
 MAX_RETRIES=30
