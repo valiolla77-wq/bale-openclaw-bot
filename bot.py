@@ -188,7 +188,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_bytes = await file_obj.download_as_bytearray()
         mime_type = update.message.document.mime_type or "application/pdf"
 
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    # مقاوم‌سازی send_chat_action در برابر خطای ۵۰۰
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    except Exception as e:
+        logging.warning(f"send_chat_action failed: {e}")
+
     thinking_msg = await update.message.reply_text("🧠 در حال پردازش...")
 
     reply = await call_gemini(
@@ -205,7 +210,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text(reply, parse_mode=parse_mode)
 
-# ==================== سرور سلامت (برای جلوگیری از Sleep شدن) ====================
+# ==================== سرور سلامت ====================
 async def health_check(request):
     return web.Response(text="OK")
 
@@ -237,7 +242,6 @@ async def main():
 
     await run_web_server()
 
-    # حلقه بی‌نهایت برای نگه داشتن برنامه
     while True:
         await asyncio.sleep(3600)
 
