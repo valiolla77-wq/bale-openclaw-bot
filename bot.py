@@ -5,13 +5,11 @@ import asyncio
 import base64
 import json
 import httpx
-from aiohttp import web
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters, CommandHandler
 
 BALE_TOKEN = os.getenv("BALE_TOKEN")
 BALE_BASE_URL = "https://tapi.bale.ai/"
-PORT = int(os.getenv("PORT", 10000))          # Render خودش این رو تزریق می‌کنه
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -205,26 +203,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text(reply, parse_mode=parse_mode)
 
-# ==================== سرور سلامت (مخصوص Render) ====================
-async def health_check(request):
-    return web.Response(text="OK")
-
-async def run_web_server():
-    app = web.Application()
-    app.router.add_get("/", health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logging.info(f"Health server running on port {PORT}")
-
-# ==================== اجرای اصلی ====================
+# ==================== اجرای اصلی (Background Worker) ====================
 async def main():
     if not BALE_TOKEN:
         logging.error("BALE_TOKEN not found!")
         return
 
-    # راه‌اندازی ربات
     ptb_app = ApplicationBuilder().token(BALE_TOKEN).base_url(BALE_BASE_URL).build()
     ptb_app.add_handler(CommandHandler("start", start))
     ptb_app.add_handler(CommandHandler("reset", reset_command))
@@ -234,14 +218,12 @@ async def main():
 
     await ptb_app.initialize()
     await ptb_app.start()
-    # شروع polling به‌صورت پس‌زمینه
-    polling_task = asyncio.create_task(ptb_app.updater.start_polling())
+    await ptb_app.updater.start_polling()
 
-    # راه‌اندازی وب‌سرور سلامت
-    await run_web_server()
-
-    # صبر می‌کنیم تا ربات به کارش ادامه بده
-    await polling_task
+    logging.info("Bot is running as Background Worker...")
+    # حلقه بی‌نهایت برای نگه داشتن برنامه در حالت Worker
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     asyncio.run(main())
