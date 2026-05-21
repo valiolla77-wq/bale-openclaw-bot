@@ -8,15 +8,79 @@ import httpx
 from aiohttp import web
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters, CommandHandler
+from huggingface_hub import hf_hub_download, upload_file
 
 BALE_TOKEN = os.getenv("BALE_TOKEN")
 BALE_BASE_URL = "https://tapi.bale.ai/"
+HF_TOKEN = os.getenv("HF_TOKEN")
+MEMORY_REPO = "valiolla/bale-bot-memory"  # نام دیتاست خود را جایگزین کنید
+MEMORY_FILE = "memory.json"
 PORT = int(os.getenv("PORT", 10000))
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
+# دیکشنری درون‌حافظه‌ای برای نگهداری تاریخچه‌ها
+user_histories = {}  # ساختار: {user_id: [{"role": "user", "text": "..."}, {"role": "model", "text": "..."}]}
+history_dirty = False  # آیا تغییری کرده که نیاز به ذخیره داشته باشد؟
+
+# ==================== توابع حافظه ====================
+def load_memory():
+    global user_histories
+    try:
+        if not HF_TOKEN:
+            logging.warning("HF_TOKEN not set, cannot load memory")
+            return
+        path = hf_hub_download(repo_id=MEMORY_REPO, filename=MEMORY_FILE, token=HF_TOKEN, repo_type="dataset")
+        with open(path, "r", encoding="utf-8") as f:
+            user_histories = json.load(f)
+        logging.info(f"Memory loaded from Hub: {len(user_histories)} users")
+    except Exception as e:
+        logging.warning(f"Could not load memory: {e}. Starting fresh.")
+        user_histories = {}
+
+def save_memory():
+    global history_dirty
+    try:
+        if not HF_TOKEN:
+            logging.warning("HF_TOKEN not set, cannot save memory")
+            return
+        # ذخیره در یک فایل موقت و سپس آپلود
+        tmp_file = "/tmp/memory.json"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(user_histories, f, ensure_ascii=False)
+        upload_file(
+            path_or_fileobj=tmp_file,
+            path_in_repo=MEMORY_FILE,
+            repo_id=MEMORY_REPO,
+            token=HF_TOKEN,
+            repo_type="dataset"
+        )
+        logging.info("Memory saved to Hub")
+        history_dirty = False
+    except Exception as e:
+        logging.error(f"Failed to save memory: {e}")
+
+def add_message(user_id: str, role: str, text: str):
+    global history_dirty
+    if user_id not in user_histories:
+        user_histories[user_id] = []
+    user_histories[user_id].append({"role": role, "text": text})
+    # فقط ۲۰ پیام آخر را نگه دار
+    if len(user_histories[user_id]) > 20:
+        user_histories[user_id] = user_histories[user_id][-20:]
+    history_dirty = True
+
+async def periodic_save(interval: int = 10):
+    """هر interval ثانیه یک‌بار اگر تغییری بود، ذخیره کند"""
+    global history_dirty
+    while True:
+        await asyncio.sleep(interval)
+        if history_dirty:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, save_memory)
 
 # ==================== توابع Gemini ====================
 async def get_available_models(api_key: str):
@@ -59,8 +123,9 @@ def clean_response(raw_text: str) -> str:
         return quoted[-1].strip()
     return text
 
-async def call_gemini(api_key: str, model: str, prompt: str, test_mode: bool = False,
-                      file_bytes: bytes = None, mime_type: str = None, max_retries: int = 3):
+async def call_gemini(api_key: str, model: str, prompt: str, user_id: str,
+                      test_mode: bool = False, file_bytes: bytes = None, mime_type: str = None,
+                      max_retries: int = 3):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     system_instruction = (
         "You are a helpful assistant. "
@@ -68,6 +133,16 @@ async def call_gemini(api_key: str, model: str, prompt: str, test_mode: bool = F
         "Do not include any reasoning, thinking steps, analysis, bullet points, or explanations. "
         "Output just the direct answer."
     )
+
+    # ساخت conversation از تاریخچهٔ کاربر (۱۰ پیام آخر)
+    history = user_histories.get(user_id, [])[-10:]
+    contents = []
+    for msg in history:
+        contents.append({
+            "role": msg["role"],
+            "parts": [{"text": msg["text"]}]
+        })
+    # اضافه کردن پیام جدید کاربر
     user_parts = []
     if prompt:
         user_parts.append({"text": prompt})
@@ -77,9 +152,11 @@ async def call_gemini(api_key: str, model: str, prompt: str, test_mode: bool = F
         encoded_file = base64.b64encode(file_bytes).decode('utf-8')
         user_parts.append({"inlineData": {"mimeType": mime_type, "data": encoded_file}})
 
+    contents.append({"role": "user", "parts": user_parts})
+
     payload = {
         "systemInstruction": {"parts": [{"text": system_instruction}]},
-        "contents": [{"role": "user", "parts": user_parts}],
+        "contents": contents,
         "generationConfig": {"temperature": 0.7, "maxOutputTokens": 700},
         "tools": [{"googleSearch": {}}]
     }
@@ -120,9 +197,14 @@ async def call_gemini(api_key: str, model: str, prompt: str, test_mode: bool = F
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data.update({"api_key": None, "model": None, "test_mode": False})
-    await update.message.reply_text("🤖 ربات هوش مصنوعی Gemini\n\nلطفاً کلید API جمینای خود را ارسال کنید.\nبرای حالت تست: /testmode")
+    await update.message.reply_text("🤖 ربات هوش مصنوعی Gemini (با حافظه)\n\nلطفاً کلید API جمینای خود را ارسال کنید.\nبرای حالت تست: /testmode")
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_chat.id)
+    if user_id in user_histories:
+        del user_histories[user_id]
+        global history_dirty
+        history_dirty = True
     await start(update, context)
 
 async def testmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -146,6 +228,7 @@ async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    user_id = str(chat_id)
     text = update.message.text.strip() if update.message.text else update.message.caption or ""
 
     if "api_key" not in context.user_data:
@@ -188,7 +271,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_bytes = await file_obj.download_as_bytearray()
         mime_type = update.message.document.mime_type or "application/pdf"
 
-    # مقاوم‌سازی send_chat_action در برابر خطای ۵۰۰
+    # ذخیرهٔ پیام کاربر در حافظه (فقط اگر متن داشته باشد)
+    if text:
+        add_message(user_id, "user", text)
+
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     except Exception as e:
@@ -200,10 +286,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         api_key=context.user_data["api_key"],
         model=context.user_data["model"],
         prompt=text,
+        user_id=user_id,
         test_mode=context.user_data.get("test_mode", False),
         file_bytes=file_bytes,
         mime_type=mime_type
     )
+
+    # ذخیرهٔ پاسخ مدل در حافظه
+    if not reply.startswith("❌") and not reply.startswith("⚠️") and not reply.startswith("🔍"):
+        add_message(user_id, "model", reply)
+
     parse_mode = "Markdown" if context.user_data.get("test_mode") else None
     try:
         await context.bot.edit_message_text(chat_id=chat_id, message_id=thinking_msg.message_id, text=reply, parse_mode=parse_mode)
@@ -228,6 +320,13 @@ async def main():
     if not BALE_TOKEN:
         logging.error("BALE_TOKEN not found!")
         return
+
+    # بارگذاری حافظه از Hub
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, load_memory)
+
+    # تسک ذخیرهٔ دوره‌ای
+    asyncio.create_task(periodic_save(interval=10))
 
     ptb_app = ApplicationBuilder().token(BALE_TOKEN).base_url(BALE_BASE_URL).build()
     ptb_app.add_handler(CommandHandler("start", start))
