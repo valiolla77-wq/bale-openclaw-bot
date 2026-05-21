@@ -26,7 +26,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bale-Gemini Bot is Running!")
 
-    def log_message(self, format, args):
+    def log_message(self, format, *args):
         return
 
 def run_health_server():
