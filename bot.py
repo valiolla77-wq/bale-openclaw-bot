@@ -5,11 +5,13 @@ import asyncio
 import base64
 import json
 import httpx
+from aiohttp import web
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters, CommandHandler
 
 BALE_TOKEN = os.getenv("BALE_TOKEN")
 BALE_BASE_URL = "https://tapi.bale.ai/"
+PORT = int(os.getenv("PORT", 10000))
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -203,7 +205,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text(reply, parse_mode=parse_mode)
 
-# ==================== اجرای اصلی (Background Worker) ====================
+# ==================== سرور سلامت (برای جلوگیری از Sleep شدن) ====================
+async def health_check(request):
+    return web.Response(text="OK")
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logging.info(f"Health server running on port {PORT}")
+
+# ==================== اجرای اصلی ====================
 async def main():
     if not BALE_TOKEN:
         logging.error("BALE_TOKEN not found!")
@@ -220,8 +235,9 @@ async def main():
     await ptb_app.start()
     await ptb_app.updater.start_polling()
 
-    logging.info("Bot is running as Background Worker...")
-    # حلقه بی‌نهایت برای نگه داشتن برنامه در حالت Worker
+    await run_web_server()
+
+    # حلقه بی‌نهایت برای نگه داشتن برنامه
     while True:
         await asyncio.sleep(3600)
 
