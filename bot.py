@@ -12,10 +12,13 @@ from huggingface_hub import hf_hub_download, upload_file
 
 BALE_TOKEN = os.getenv("BALE_TOKEN")
 BALE_BASE_URL = "https://tapi.bale.ai/"
+BALE_FILE_URL = "https://tapi.bale.ai/file/bot"   # آدرس صحیح دانلود فایل در بله
 HF_TOKEN = os.getenv("HF_TOKEN")
-MEMORY_REPO = "valiolla/bale-bot-memory"   # <-- نام دیتاست خود را جایگزین کنید
+MEMORY_REPO = "valiolla/bale-bot-memory"
 MEMORY_FILE = "memory.json"
 PORT = int(os.getenv("PORT", 10000))
+
+MAX_OUTPUT_TOKENS = 3000
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -166,7 +169,10 @@ async def call_gemini(api_key: str, model: str, prompt: str, user_id: str,
     payload = {
         "systemInstruction": {"parts": [{"text": system_instruction}]},
         "contents": contents,
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 700}
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": MAX_OUTPUT_TOKENS
+        }
     }
     if search_enabled:
         payload["tools"] = [{"googleSearch": {}}]
@@ -247,13 +253,11 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Google Search {status} شد.")
 
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دستور /model برای تغییر مدل"""
     api_key = context.user_data.get("api_key")
     if not api_key:
         await update.message.reply_text("❗ ابتدا باید کلید API خود را وارد کنید.")
         return
     await update.message.reply_text("📥 لطفاً نام مدل جدید را ارسال کنید (مثل gemini-2.0-flash).")
-    # یک فلگ در user_data می‌گذاریم که پیام بعدی را به‌عنوان مدل جدید پردازش کند
     context.user_data["awaiting_model"] = True
 
 async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -274,11 +278,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(chat_id)
     text = update.message.text.strip() if update.message.text else update.message.caption or ""
 
-    # بارگذاری تنظیمات اگر خالی باشد
     if "api_key" not in context.user_data:
         load_user_settings_to_context(user_id, context)
 
-    # اگر کاربر در حال تغییر مدل باشد
     if context.user_data.get("awaiting_model"):
         if not text:
             await update.message.reply_text("❗ نام مدل نمی‌تواند خالی باشد.")
@@ -293,7 +295,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❗ نام مدل معتبر نیست. از لیست مدل‌ها انتخاب کنید.")
         return
 
-    # دریافت کلید API
     if not context.user_data.get("api_key"):
         if text and ((text.startswith("AIza") and len(text) > 30) or (not text.startswith("/") and len(text) > 20)):
             await update.message.reply_text("⏳ بررسی کلید...")
@@ -309,7 +310,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("🔑 لطفاً یک کلید API معتبر جمینای ارسال کنید.")
         return
 
-    # انتخاب مدل اولیه
     if not context.user_data.get("model"):
         if update.message.photo or update.message.document:
             await update.message.reply_text("❗ لطفاً اول نام مدل را به صورت متنی بفرستید.")
@@ -323,7 +323,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❗ مدل معتبری ارسال کنید (مثل gemini-2.0-flash).")
         return
 
-    # ----- پردازش فایل -----
     file_bytes = None
     mime_type = None
     try:
@@ -343,20 +342,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text:
         add_message(user_id, "user", text)
 
-    # تلاش برای send_chat_action (اگر شکست خورد مهم نیست)
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     except Exception:
         pass
 
-    # تلاش برای ارسال پیام "در حال پردازش". اگر ناموفق بود، مستقیماً call_gemini می‌شود
     thinking_msg = None
     try:
         thinking_msg = await update.message.reply_text("🧠 در حال پردازش...")
     except Exception as e:
         logging.warning(f"Could not send thinking message: {e}")
 
-    # فراخوانی جمینای
     reply = await call_gemini(
         api_key=context.user_data["api_key"],
         model=context.user_data["model"],
@@ -371,7 +367,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not reply.startswith("❌") and not reply.startswith("⚠️") and not reply.startswith("🔍"):
         add_message(user_id, "model", reply)
 
-    # ارسال پاسخ: اگر thinking_msg با موفقیت ساخته شد، ویرایشش کن، وگرنه پیام جدید
     parse_mode = "Markdown" if context.user_data.get("test_mode") else None
     if thinking_msg:
         try:
@@ -409,7 +404,13 @@ async def main():
     await loop.run_in_executor(None, load_memory)
     asyncio.create_task(periodic_save(interval=10))
 
-    ptb_app = ApplicationBuilder().token(BALE_TOKEN).base_url(BALE_BASE_URL).build()
+    # ساخت ربات با تنظیمات صحیح دانلود فایل
+    ptb_app = (ApplicationBuilder()
+               .token(BALE_TOKEN)
+               .base_url(BALE_BASE_URL)
+               .base_file_url(BALE_FILE_URL)   # <-- این خط مشکل دانلود را حل می‌کند
+               .build())
+
     ptb_app.add_handler(CommandHandler("start", start))
     ptb_app.add_handler(CommandHandler("reset", reset_command))
     ptb_app.add_handler(CommandHandler("models", models_command))
