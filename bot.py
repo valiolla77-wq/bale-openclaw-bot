@@ -13,7 +13,7 @@ from huggingface_hub import hf_hub_download, upload_file
 BALE_TOKEN = os.getenv("BALE_TOKEN")
 BALE_BASE_URL = "https://tapi.bale.ai/"
 HF_TOKEN = os.getenv("HF_TOKEN")
-MEMORY_REPO = "valiolla/bale-bot-memory"  # نام دیتاست خود را جایگزین کنید
+MEMORY_REPO = "valiolla/bale-bot-memory"
 MEMORY_FILE = "memory.json"
 PORT = int(os.getenv("PORT", 10000))
 
@@ -22,32 +22,28 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# دیکشنری درون‌حافظه‌ای برای نگهداری تاریخچه‌ها
-user_histories = {}  # ساختار: {user_id: [{"role": "user", "text": "..."}, {"role": "model", "text": "..."}]}
-history_dirty = False  # آیا تغییری کرده که نیاز به ذخیره داشته باشد؟
+user_histories = {}
+history_dirty = False
 
 # ==================== توابع حافظه ====================
 def load_memory():
     global user_histories
     try:
         if not HF_TOKEN:
-            logging.warning("HF_TOKEN not set, cannot load memory")
             return
         path = hf_hub_download(repo_id=MEMORY_REPO, filename=MEMORY_FILE, token=HF_TOKEN, repo_type="dataset")
         with open(path, "r", encoding="utf-8") as f:
             user_histories = json.load(f)
-        logging.info(f"Memory loaded from Hub: {len(user_histories)} users")
+        logging.info(f"Memory loaded: {len(user_histories)} users")
     except Exception as e:
-        logging.warning(f"Could not load memory: {e}. Starting fresh.")
+        logging.warning(f"Could not load memory: {e}")
         user_histories = {}
 
 def save_memory():
     global history_dirty
     try:
         if not HF_TOKEN:
-            logging.warning("HF_TOKEN not set, cannot save memory")
             return
-        # ذخیره در یک فایل موقت و سپس آپلود
         tmp_file = "/tmp/memory.json"
         with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(user_histories, f, ensure_ascii=False)
@@ -58,23 +54,21 @@ def save_memory():
             token=HF_TOKEN,
             repo_type="dataset"
         )
-        logging.info("Memory saved to Hub")
+        logging.info("Memory saved")
         history_dirty = False
     except Exception as e:
-        logging.error(f"Failed to save memory: {e}")
+        logging.error(f"Save failed: {e}")
 
 def add_message(user_id: str, role: str, text: str):
     global history_dirty
     if user_id not in user_histories:
         user_histories[user_id] = []
     user_histories[user_id].append({"role": role, "text": text})
-    # فقط ۲۰ پیام آخر را نگه دار
     if len(user_histories[user_id]) > 20:
         user_histories[user_id] = user_histories[user_id][-20:]
     history_dirty = True
 
 async def periodic_save(interval: int = 10):
-    """هر interval ثانیه یک‌بار اگر تغییری بود، ذخیره کند"""
     global history_dirty
     while True:
         await asyncio.sleep(interval)
@@ -125,7 +119,7 @@ def clean_response(raw_text: str) -> str:
 
 async def call_gemini(api_key: str, model: str, prompt: str, user_id: str,
                       test_mode: bool = False, file_bytes: bytes = None, mime_type: str = None,
-                      max_retries: int = 3):
+                      search_enabled: bool = True, max_retries: int = 3):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     system_instruction = (
         "You are a helpful assistant. "
@@ -134,15 +128,11 @@ async def call_gemini(api_key: str, model: str, prompt: str, user_id: str,
         "Output just the direct answer."
     )
 
-    # ساخت conversation از تاریخچهٔ کاربر (۱۰ پیام آخر)
     history = user_histories.get(user_id, [])[-10:]
     contents = []
     for msg in history:
-        contents.append({
-            "role": msg["role"],
-            "parts": [{"text": msg["text"]}]
-        })
-    # اضافه کردن پیام جدید کاربر
+        contents.append({"role": msg["role"], "parts": [{"text": msg["text"]}]})
+
     user_parts = []
     if prompt:
         user_parts.append({"text": prompt})
@@ -157,9 +147,12 @@ async def call_gemini(api_key: str, model: str, prompt: str, user_id: str,
     payload = {
         "systemInstruction": {"parts": [{"text": system_instruction}]},
         "contents": contents,
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 700},
-        "tools": [{"googleSearch": {}}]
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 700}
     }
+
+    if search_enabled:
+        payload["tools"] = [{"googleSearch": {}}]
+
     if "gemini-3" in model or "gemini-3.5" in model:
         payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "minimal"}
     elif "gemini-2.5" in model:
@@ -196,8 +189,8 @@ async def call_gemini(api_key: str, model: str, prompt: str, user_id: str,
 # ==================== هندلرهای ربات ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    context.user_data.update({"api_key": None, "model": None, "test_mode": False})
-    await update.message.reply_text("🤖 ربات هوش مصنوعی Gemini (با حافظه)\n\nلطفاً کلید API جمینای خود را ارسال کنید.\nبرای حالت تست: /testmode")
+    context.user_data.update({"api_key": None, "model": None, "test_mode": False, "search_enabled": True})
+    await update.message.reply_text("🤖 ربات هوش مصنوعی Gemini (با حافظه)\n\nلطفاً کلید API جمینای خود را ارسال کنید.\nبرای حالت تست: /testmode\nبرای تغییر وضعیت جستجو: /search")
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_chat.id)
@@ -212,6 +205,12 @@ async def testmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["test_mode"] = not current
     status = "روشن 🟢" if context.user_data["test_mode"] else "خاموش 🔴"
     await update.message.reply_text(f"حالت تست (JSON خام) {status} شد.")
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    current = context.user_data.get("search_enabled", True)
+    context.user_data["search_enabled"] = not current
+    status = "روشن 🟢" if context.user_data["search_enabled"] else "خاموش 🔴"
+    await update.message.reply_text(f"Google Search {status} شد.")
 
 async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     api_key = context.user_data.get("api_key")
@@ -232,7 +231,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip() if update.message.text else update.message.caption or ""
 
     if "api_key" not in context.user_data:
-        context.user_data.update({"api_key": None, "model": None, "test_mode": False})
+        context.user_data.update({"api_key": None, "model": None, "test_mode": False, "search_enabled": True})
 
     if not context.user_data["api_key"]:
         if text and ((text.startswith("AIza") and len(text) > 30) or (not text.startswith("/") and len(text) > 20)):
@@ -271,7 +270,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_bytes = await file_obj.download_as_bytearray()
         mime_type = update.message.document.mime_type or "application/pdf"
 
-    # ذخیرهٔ پیام کاربر در حافظه (فقط اگر متن داشته باشد)
     if text:
         add_message(user_id, "user", text)
 
@@ -289,10 +287,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id=user_id,
         test_mode=context.user_data.get("test_mode", False),
         file_bytes=file_bytes,
-        mime_type=mime_type
+        mime_type=mime_type,
+        search_enabled=context.user_data.get("search_enabled", True)
     )
 
-    # ذخیرهٔ پاسخ مدل در حافظه
     if not reply.startswith("❌") and not reply.startswith("⚠️") and not reply.startswith("🔍"):
         add_message(user_id, "model", reply)
 
@@ -321,11 +319,8 @@ async def main():
         logging.error("BALE_TOKEN not found!")
         return
 
-    # بارگذاری حافظه از Hub
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, load_memory)
-
-    # تسک ذخیرهٔ دوره‌ای
     asyncio.create_task(periodic_save(interval=10))
 
     ptb_app = ApplicationBuilder().token(BALE_TOKEN).base_url(BALE_BASE_URL).build()
@@ -333,6 +328,7 @@ async def main():
     ptb_app.add_handler(CommandHandler("reset", reset_command))
     ptb_app.add_handler(CommandHandler("models", models_command))
     ptb_app.add_handler(CommandHandler("testmode", testmode_command))
+    ptb_app.add_handler(CommandHandler("search", search_command))
     ptb_app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Document.ALL & ~filters.COMMAND, handle_message))
 
     await ptb_app.initialize()
