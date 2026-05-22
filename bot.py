@@ -13,7 +13,7 @@ from huggingface_hub import hf_hub_download, upload_file
 BALE_TOKEN = os.getenv("BALE_TOKEN")
 BALE_BASE_URL = "https://tapi.bale.ai/"
 HF_TOKEN = os.getenv("HF_TOKEN")
-MEMORY_REPO = "valiolla/bale-bot-memory"
+MEMORY_REPO = "valiolla/bale-bot-memory"   # <-- نام دیتاست خود را جایگزین کنید
 MEMORY_FILE = "memory.json"
 PORT = int(os.getenv("PORT", 10000))
 
@@ -23,58 +23,77 @@ logging.basicConfig(
 )
 
 user_histories = {}
-history_dirty = False
+user_settings = {}
+memory_dirty = False
 
 # ==================== توابع حافظه ====================
 def load_memory():
-    global user_histories
+    global user_histories, user_settings
     try:
         if not HF_TOKEN:
             return
         path = hf_hub_download(repo_id=MEMORY_REPO, filename=MEMORY_FILE, token=HF_TOKEN, repo_type="dataset")
         with open(path, "r", encoding="utf-8") as f:
-            user_histories = json.load(f)
-        logging.info(f"Memory loaded: {len(user_histories)} users")
+            data = json.load(f)
+            user_histories = data.get("histories", {})
+            user_settings = data.get("settings", {})
+        logging.info(f"Memory loaded: {len(user_histories)} histories, {len(user_settings)} settings")
     except Exception as e:
         logging.warning(f"Could not load memory: {e}")
         user_histories = {}
+        user_settings = {}
 
 def save_memory():
-    global history_dirty
+    global memory_dirty
     try:
         if not HF_TOKEN:
             return
         tmp_file = "/tmp/memory.json"
+        data = {"histories": user_histories, "settings": user_settings}
         with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(user_histories, f, ensure_ascii=False)
-        upload_file(
-            path_or_fileobj=tmp_file,
-            path_in_repo=MEMORY_FILE,
-            repo_id=MEMORY_REPO,
-            token=HF_TOKEN,
-            repo_type="dataset"
-        )
+            json.dump(data, f, ensure_ascii=False)
+        upload_file(path_or_fileobj=tmp_file, path_in_repo=MEMORY_FILE,
+                    repo_id=MEMORY_REPO, token=HF_TOKEN, repo_type="dataset")
         logging.info("Memory saved")
-        history_dirty = False
+        memory_dirty = False
     except Exception as e:
         logging.error(f"Save failed: {e}")
 
 def add_message(user_id: str, role: str, text: str):
-    global history_dirty
+    global memory_dirty
     if user_id not in user_histories:
         user_histories[user_id] = []
     user_histories[user_id].append({"role": role, "text": text})
     if len(user_histories[user_id]) > 20:
         user_histories[user_id] = user_histories[user_id][-20:]
-    history_dirty = True
+    memory_dirty = True
+
+def update_settings(user_id: str, key: str, value):
+    global memory_dirty
+    if user_id not in user_settings:
+        user_settings[user_id] = {}
+    user_settings[user_id][key] = value
+    memory_dirty = True
 
 async def periodic_save(interval: int = 10):
-    global history_dirty
+    global memory_dirty
     while True:
         await asyncio.sleep(interval)
-        if history_dirty:
+        if memory_dirty:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, save_memory)
+
+def load_user_settings_to_context(user_id: str, context: ContextTypes.DEFAULT_TYPE):
+    if user_id in user_settings:
+        saved = user_settings[user_id]
+        if "api_key" not in context.user_data or not context.user_data["api_key"]:
+            context.user_data["api_key"] = saved.get("api_key")
+        if "model" not in context.user_data or not context.user_data["model"]:
+            context.user_data["model"] = saved.get("model")
+        if "search_enabled" not in context.user_data:
+            context.user_data["search_enabled"] = saved.get("search_enabled", True)
+        if "test_mode" not in context.user_data:
+            context.user_data["test_mode"] = saved.get("test_mode", False)
 
 # ==================== توابع Gemini ====================
 async def get_available_models(api_key: str):
@@ -149,10 +168,8 @@ async def call_gemini(api_key: str, model: str, prompt: str, user_id: str,
         "contents": contents,
         "generationConfig": {"temperature": 0.7, "maxOutputTokens": 700}
     }
-
     if search_enabled:
         payload["tools"] = [{"googleSearch": {}}]
-
     if "gemini-3" in model or "gemini-3.5" in model:
         payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "minimal"}
     elif "gemini-2.5" in model:
@@ -188,40 +205,67 @@ async def call_gemini(api_key: str, model: str, prompt: str, user_id: str,
 
 # ==================== هندلرهای ربات ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    context.user_data.update({"api_key": None, "model": None, "test_mode": False, "search_enabled": True})
-    await update.message.reply_text("🤖 ربات هوش مصنوعی Gemini (با حافظه)\n\nلطفاً کلید API جمینای خود را ارسال کنید.\nبرای حالت تست: /testmode\nبرای تغییر وضعیت جستجو: /search")
+    user_id = str(update.effective_chat.id)
+    load_user_settings_to_context(user_id, context)
+    if context.user_data.get("api_key") and context.user_data.get("model"):
+        await update.message.reply_text(
+            f"🎉 خوش آمدید! تنظیمات شما بازیابی شد.\nمدل: `{context.user_data['model']}`\n"
+            "آمادهٔ چت. /model برای تغییر مدل\n/search برای جستجو\n/testmode برای تست",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            "🤖 ربات هوش مصنوعی Gemini\nلطفاً کلید API جمینای خود را ارسال کنید.\n"
+            "/model  تغییر مدل\n/search  جستجوی گوگل\n/testmode  حالت تست"
+        )
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_chat.id)
     if user_id in user_histories:
         del user_histories[user_id]
-        global history_dirty
-        history_dirty = True
-    await start(update, context)
+    if user_id in user_settings:
+        del user_settings[user_id]
+    global memory_dirty
+    memory_dirty = True
+    context.user_data.clear()
+    await update.message.reply_text("🔄 همه چیز پاک شد. لطفاً کلید جدید بفرستید.")
 
 async def testmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current = context.user_data.get("test_mode", False)
     context.user_data["test_mode"] = not current
+    user_id = str(update.effective_chat.id)
+    update_settings(user_id, "test_mode", context.user_data["test_mode"])
     status = "روشن 🟢" if context.user_data["test_mode"] else "خاموش 🔴"
-    await update.message.reply_text(f"حالت تست (JSON خام) {status} شد.")
+    await update.message.reply_text(f"حالت تست {status} شد.")
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current = context.user_data.get("search_enabled", True)
     context.user_data["search_enabled"] = not current
+    user_id = str(update.effective_chat.id)
+    update_settings(user_id, "search_enabled", context.user_data["search_enabled"])
     status = "روشن 🟢" if context.user_data["search_enabled"] else "خاموش 🔴"
     await update.message.reply_text(f"Google Search {status} شد.")
+
+async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دستور /model برای تغییر مدل"""
+    api_key = context.user_data.get("api_key")
+    if not api_key:
+        await update.message.reply_text("❗ ابتدا باید کلید API خود را وارد کنید.")
+        return
+    await update.message.reply_text("📥 لطفاً نام مدل جدید را ارسال کنید (مثل gemini-2.0-flash).")
+    # یک فلگ در user_data می‌گذاریم که پیام بعدی را به‌عنوان مدل جدید پردازش کند
+    context.user_data["awaiting_model"] = True
 
 async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     api_key = context.user_data.get("api_key")
     if not api_key:
-        await update.message.reply_text("❗ ابتدا باید کلید API خود را ارسال کنید.")
+        await update.message.reply_text("❗ ابتدا کلید API را وارد کنید.")
         return
-    await update.message.reply_text("⏳ در حال دریافت لیست مدل‌ها...")
+    await update.message.reply_text("⏳ دریافت لیست مدل‌ها...")
     models = await get_available_models(api_key)
     if models:
         model_list = "\n".join([f"• `{m}`" for m in models[:15]])
-        await update.message.reply_text(f"✅ مدل‌های در دسترس:\n\n{model_list}\n\nیکی را کپی کنید و ارسال کنید.", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ مدل‌ها:\n\n{model_list}\n\nیکی را کپی و ارسال کنید.", parse_mode="Markdown")
     else:
         await update.message.reply_text("❌ نتوانستم مدل‌ها را دریافت کنم.")
 
@@ -230,56 +274,89 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(chat_id)
     text = update.message.text.strip() if update.message.text else update.message.caption or ""
 
+    # بارگذاری تنظیمات اگر خالی باشد
     if "api_key" not in context.user_data:
-        context.user_data.update({"api_key": None, "model": None, "test_mode": False, "search_enabled": True})
+        load_user_settings_to_context(user_id, context)
 
-    if not context.user_data["api_key"]:
-        if text and ((text.startswith("AIza") and len(text) > 30) or (not text.startswith("/") and len(text) > 20)):
-            await update.message.reply_text("⏳ در حال بررسی کلید API...")
-            models = await get_available_models(text)
-            if not models:
-                await update.message.reply_text("❌ کلید API معتبر نیست یا خطایی رخ داد.")
-                return
-            context.user_data["api_key"] = text
-            model_list = "\n".join([f"• `{m}`" for m in models[:15]])
-            await update.message.reply_text(f"✅ کلید API ذخیره شد.\n\nمدل‌های در دسترس:\n{model_list}\n\nیک مدل را کپی و ارسال کنید.", parse_mode="Markdown")
-        else:
-            await update.message.reply_text("🔑 لطفاً اول یک کلید API معتبر جمینای ارسال کنید.")
-        return
-
-    if not context.user_data["model"]:
-        if update.message.photo or update.message.document:
-            await update.message.reply_text("❗ لطفاً اول اسم مدل را به صورت متنی بفرستید.")
+    # اگر کاربر در حال تغییر مدل باشد
+    if context.user_data.get("awaiting_model"):
+        if not text:
+            await update.message.reply_text("❗ نام مدل نمی‌تواند خالی باشد.")
             return
         models = await get_available_models(context.user_data["api_key"])
         if text in models:
             context.user_data["model"] = text
-            await update.message.reply_text(f"✅ مدل انتخاب شد: `{text}`\nحالا می‌تونی چت کنی یا فایل بفرستی.", parse_mode="Markdown")
+            update_settings(user_id, "model", text)
+            context.user_data["awaiting_model"] = False
+            await update.message.reply_text(f"✅ مدل به `{text}` تغییر یافت.", parse_mode="Markdown")
         else:
-            await update.message.reply_text("❗ لطفاً یک مدل معتبر از لیست ارسال کنید (مثل gemini-2.0-flash).")
+            await update.message.reply_text("❗ نام مدل معتبر نیست. از لیست مدل‌ها انتخاب کنید.")
         return
 
+    # دریافت کلید API
+    if not context.user_data.get("api_key"):
+        if text and ((text.startswith("AIza") and len(text) > 30) or (not text.startswith("/") and len(text) > 20)):
+            await update.message.reply_text("⏳ بررسی کلید...")
+            models = await get_available_models(text)
+            if not models:
+                await update.message.reply_text("❌ کلید معتبر نیست.")
+                return
+            context.user_data["api_key"] = text
+            update_settings(user_id, "api_key", text)
+            model_list = "\n".join([f"• `{m}`" for m in models[:15]])
+            await update.message.reply_text(f"✅ کلید ذخیره شد.\n\nمدل‌ها:\n{model_list}\n\nیک مدل را ارسال کنید.", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("🔑 لطفاً یک کلید API معتبر جمینای ارسال کنید.")
+        return
+
+    # انتخاب مدل اولیه
+    if not context.user_data.get("model"):
+        if update.message.photo or update.message.document:
+            await update.message.reply_text("❗ لطفاً اول نام مدل را به صورت متنی بفرستید.")
+            return
+        models = await get_available_models(context.user_data["api_key"])
+        if text in models:
+            context.user_data["model"] = text
+            update_settings(user_id, "model", text)
+            await update.message.reply_text(f"✅ مدل انتخاب شد: `{text}`\nحالا چت کنید.", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❗ مدل معتبری ارسال کنید (مثل gemini-2.0-flash).")
+        return
+
+    # ----- پردازش فایل -----
     file_bytes = None
     mime_type = None
-    if update.message.photo:
-        file_obj = await update.message.photo[-1].get_file()
-        file_bytes = await file_obj.download_as_bytearray()
-        mime_type = "image/jpeg"
-    elif update.message.document:
-        file_obj = await update.message.document.get_file()
-        file_bytes = await file_obj.download_as_bytearray()
-        mime_type = update.message.document.mime_type or "application/pdf"
+    try:
+        if update.message.photo:
+            file_obj = await update.message.photo[-1].get_file()
+            file_bytes = await file_obj.download_as_bytearray()
+            mime_type = "image/jpeg"
+        elif update.message.document:
+            file_obj = await update.message.document.get_file()
+            file_bytes = await file_obj.download_as_bytearray()
+            mime_type = update.message.document.mime_type or "application/pdf"
+    except Exception as e:
+        logging.error(f"Download failed: {e}")
+        await update.message.reply_text("❌ خطا در دریافت فایل.")
+        return
 
     if text:
         add_message(user_id, "user", text)
 
+    # تلاش برای send_chat_action (اگر شکست خورد مهم نیست)
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    except Exception:
+        pass
+
+    # تلاش برای ارسال پیام "در حال پردازش". اگر ناموفق بود، مستقیماً call_gemini می‌شود
+    thinking_msg = None
+    try:
+        thinking_msg = await update.message.reply_text("🧠 در حال پردازش...")
     except Exception as e:
-        logging.warning(f"send_chat_action failed: {e}")
+        logging.warning(f"Could not send thinking message: {e}")
 
-    thinking_msg = await update.message.reply_text("🧠 در حال پردازش...")
-
+    # فراخوانی جمینای
     reply = await call_gemini(
         api_key=context.user_data["api_key"],
         model=context.user_data["model"],
@@ -294,10 +371,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not reply.startswith("❌") and not reply.startswith("⚠️") and not reply.startswith("🔍"):
         add_message(user_id, "model", reply)
 
+    # ارسال پاسخ: اگر thinking_msg با موفقیت ساخته شد، ویرایشش کن، وگرنه پیام جدید
     parse_mode = "Markdown" if context.user_data.get("test_mode") else None
-    try:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=thinking_msg.message_id, text=reply, parse_mode=parse_mode)
-    except Exception:
+    if thinking_msg:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=thinking_msg.message_id,
+                text=reply,
+                parse_mode=parse_mode
+            )
+        except Exception:
+            await update.message.reply_text(reply, parse_mode=parse_mode)
+    else:
         await update.message.reply_text(reply, parse_mode=parse_mode)
 
 # ==================== سرور سلامت ====================
@@ -329,6 +415,7 @@ async def main():
     ptb_app.add_handler(CommandHandler("models", models_command))
     ptb_app.add_handler(CommandHandler("testmode", testmode_command))
     ptb_app.add_handler(CommandHandler("search", search_command))
+    ptb_app.add_handler(CommandHandler("model", model_command))
     ptb_app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Document.ALL & ~filters.COMMAND, handle_message))
 
     await ptb_app.initialize()
